@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.modules.admin.admin_helper import (
     get_admin_by_username,
+    get_permission_list,
     hash_password,
     serialize_admin,
     verify_password,
@@ -40,8 +41,26 @@ async def register_admin(db: AsyncSession, payload: AdminRegisterSchema):
         await db.commit()
         await db.refresh(new_admin)
 
+        serializer_admin = serialize_admin(new_admin)
+        permission_list = await get_permission_list(db, new_admin.id)
+
+        token = create_access_token(
+            {
+                "userid": str(new_admin.userid),
+                "id": new_admin.id,
+                "username": new_admin.username,
+                "role": new_admin.role,
+            }
+        )
+        new_admin.token = token
+        await db.commit()
+
         return api_response_success(
-            serialize_admin(new_admin),
+            {
+                "accessToken": token,
+                **serializer_admin,
+                "permissions": permission_list,
+            },
             "Admin registered successfully",
             StatusCode.create,
         )
@@ -65,17 +84,25 @@ async def login_admin(db: AsyncSession, payload: AdminLoginSchema):
                 "Admin account is not active", StatusCode.forbidden, []
             )
 
+        serializer_admin = serialize_admin(admin)
+        permission_list = await get_permission_list(db, admin.id)
+
         token = create_access_token(
-            {"userid": str(admin.userid), "role": admin.role}
+            {
+                "userid": str(admin.userid),
+                "id": admin.id,
+                "username": admin.username,
+                "role": admin.role,
+            }
         )
         admin.token = token
         await db.commit()
 
         return api_response_success(
             {
-                "access_token": token,
-                "token_type": "bearer",
-                "admin": serialize_admin(admin),
+                "accessToken": token,
+                **serializer_admin,
+                "permissions": permission_list,
             },
             "Login successful",
             StatusCode.success,

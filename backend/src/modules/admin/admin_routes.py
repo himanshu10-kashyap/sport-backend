@@ -7,7 +7,7 @@ from src.modules.admin.admin_services import login_admin, register_admin
 
 router = APIRouter(
     prefix="/api/admin",
-    tags=["Cricbuzz Admin"],
+    tags=["Score Admin"],
 )
 
  

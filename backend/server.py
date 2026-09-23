@@ -22,7 +22,7 @@ import uvicorn
 # Auto-create missing database tables on startup
 
 app = FastAPI(
-    title="cricbuzz",
+    title="SCORE",
     version="1.0.0",
 )
 
@@ -46,11 +46,6 @@ app.add_middleware(
 from src.modules.admin.admin_routes import router as admin_router
 
 app.include_router(admin_router)
-
-
-
-# if not scheduler.running:
-#     scheduler.start()
 
 
 if __name__ == "__main__":     

@@ -4,6 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.admin_model import Admin
+from src.models.permission_model import Permission
 
 password_hasher = PasswordHasher()
 
@@ -32,3 +33,10 @@ def serialize_admin(admin: Admin) -> dict:
         "status": admin.status,
         "userid": str(admin.userid),
     }
+
+
+async def get_permission_list(db: AsyncSession, admin_id: int) -> list:
+    result = await db.execute(
+        select(Permission.permission).where(Permission.adminid == admin_id)
+    )
+    return [p for p in result.scalars().all()]
