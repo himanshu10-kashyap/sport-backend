@@ -10,6 +10,7 @@ from src.config.database import DATABASE_URL
 
 import src.models.admin_model  # noqa: F401
 import src.models.permission_model  # noqa: F401
+import src.models.rate_limit_model  # noqa: F401
 
 config = context.config
 

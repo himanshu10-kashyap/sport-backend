@@ -1,6 +1,7 @@
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from jose import jwt, JWTError
 import os
 
@@ -28,7 +29,7 @@ def authorization(
 
     async def authorize_user(
         credentials: HTTPAuthorizationCredentials = Depends(security),
-        db: Session = Depends(get_db)
+        db: AsyncSession = Depends(get_db)
     ):
         try:
             token = credentials.credentials
@@ -62,11 +63,10 @@ def authorization(
                     detail="Invalid role"
                 )
 
-            existing_user = (
-                db.query(model)
-                .filter(model.id == user_id)
-                .first()
+            result = await db.execute(
+                select(model).where(model.id == user_id)
             )
+            existing_user = result.scalars().first()
 
             if not existing_user:
                 raise HTTPException(
@@ -85,8 +85,14 @@ def authorization(
 
             # Permission check for Admin / SubAdmin
             permissions_data = (
-                db.query(Permission)
-                .filter(Permission.adminid == existing_user.id)
+                (
+                    await db.execute(
+                        select(Permission).where(
+                            Permission.adminid == str(existing_user.userid)
+                        )
+                    )
+                )
+                .scalars()
                 .all()
             )
 

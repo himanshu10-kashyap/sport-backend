@@ -3,45 +3,54 @@ from sqlalchemy import (
     Integer,
     String,
     ForeignKey,
-    DateTime
+    DateTime,
 )
-
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
-from sqlalchemy.dialects.postgresql import UUID
-import uuid
-from sqlalchemy import Boolean
 
 from src.config.base import Base
 
 
 class Permission(Base):
+
     __tablename__ = "permissions"
+
     id = Column(
         Integer,
         primary_key=True,
         autoincrement=True
     )
+
     adminid = Column(
-        Integer,
+        UUID(as_uuid=True),
         ForeignKey(
-            "admins.id",  
+            "admins.userid",
             ondelete="CASCADE",
             onupdate="CASCADE"
         ),
         nullable=False,
         index=True
     )
+
     permission = Column(
         String(255),
         nullable=False
     )
+
     created_at = Column(
-        DateTime(timezone=True),
+        DateTime,
         server_default=func.now()
     )
+
     updated_at = Column(
-        DateTime(timezone=True),
+        DateTime,
         server_default=func.now(),
         onupdate=func.now()
+    )
+
+    admin = relationship(
+        "Admin",
+        back_populates="permissions",
+        primaryjoin="Admin.userid == Permission.adminid",
     )

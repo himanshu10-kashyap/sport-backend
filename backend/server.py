@@ -47,6 +47,10 @@ from src.modules.admin.admin_routes import router as admin_router
 
 app.include_router(admin_router)
 
+from utils.rate_limit import DynamicRateLimitMiddleware
+
+app.add_middleware(DynamicRateLimitMiddleware)
+
 
 if __name__ == "__main__":     
     

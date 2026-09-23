@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, DateTime,Text
 from sqlalchemy.sql import func
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
 import uuid
 from sqlalchemy import Boolean
 
@@ -53,5 +54,11 @@ class Admin(Base):
         DateTime(timezone=True),
         server_default=func.now(),
         onupdate=func.now()
+    )
+
+    permissions = relationship(
+        "Permission",
+        back_populates="admin",
+        primaryjoin="Admin.userid == Permission.adminid",
     )
  
