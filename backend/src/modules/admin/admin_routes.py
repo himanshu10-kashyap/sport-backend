@@ -54,14 +54,14 @@ async def create_subadmin(
     return await create_sub_admin(db, payload, current_user)
 
 
-# @router.put("/subadmins/{userid}/permissions")
-# async def edit_sub_admin_permissions(
-#     userid: str,
-#     payload: UpdatePermissionSchema,
-#     db: AsyncSession = Depends(get_db),
-#     current_user=Depends(authorization(allowed_roles=["ADMIN"])),
-# ):
-#     return await sub_admin_permissions_edit(db, userid, payload, current_user)
+@router.put("/subadmins/{userid}/permissions")
+async def edit_sub_admin_permissions(
+    userid: str,
+    payload: UpdatePermissionSchema,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(authorization(allowed_roles=["ADMIN"])),
+):
+    return await sub_admin_permissions_edit(db, userid, payload, current_user)
 
 
 @router.get("/subadmins")
@@ -73,13 +73,13 @@ async def fetch_all_sub_admins(
     return await get_all_sub_admins(db=db, pagination=pagination)
 
 
-# @router.get("/subadmins/{userid}/permissions")
-# async def fetch_sub_admin_permission(
-#     userid: str,
-#     db: AsyncSession = Depends(get_db),
-#     current_user=Depends(authorization(allowed_roles=["ADMIN"])),
-# ):
-#     return await get_sub_admin_permission(db=db, userid=userid)
+@router.get("/subadmins/{userid}/permissions")
+async def fetch_sub_admin_permission(
+    userid: str,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(authorization(allowed_roles=["ADMIN"])),
+):
+    return await get_sub_admin_permission(db=db, userid=userid)
 
 
 @router.put("/subadmins/password/change")
@@ -111,7 +111,12 @@ async def delete_sub_admin(
 @router.get("/settings/rate/limit")
 async def fetch_rate_limit(
     db: AsyncSession = Depends(get_db),
-    current_user=Depends(authorization(allowed_roles=["ADMIN"])),
+    current_user=Depends(
+        authorization(
+            allowed_roles=["ADMIN", "SUBADMIN"],
+            required_permissions=["rate_limit"],
+        )
+    ),
 ):
     return await get_rate_limit_setting(db)
 
@@ -120,6 +125,11 @@ async def fetch_rate_limit(
 async def edit_rate_limit(
     payload: RateLimitSchema,
     db: AsyncSession = Depends(get_db),
-    current_user=Depends(authorization(allowed_roles=["ADMIN"])),
+    current_user=Depends(
+        authorization(
+            allowed_roles=["ADMIN", "SUBADMIN"],
+            required_permissions=["rate_limit"],
+        )
+    ),
 ):
     return await update_rate_limit_setting(db, payload.value)

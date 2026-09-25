@@ -1,5 +1,4 @@
 import logging
-from dotenv import load_dotenv
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,8 +31,6 @@ from utils.jwt import create_access_token
 from utils.status_code import StatusCode
 
 logger = logging.getLogger(__name__)
-
-load_dotenv()
 
 
 async def register_admin(db: AsyncSession, payload: AdminRegisterSchema):
