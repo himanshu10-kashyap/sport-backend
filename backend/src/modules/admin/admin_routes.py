@@ -79,7 +79,7 @@ async def fetch_sub_admin_permission(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(authorization(allowed_roles=["ADMIN"])),
 ):
-    return await get_sub_admin_permission(db=db, userid=userid)
+    return await get_sub_admin_permission(db, userid)
 
 
 @router.put("/subadmins/password/change")

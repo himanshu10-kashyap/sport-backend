@@ -5,7 +5,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from .base import Base
 
-load_dotenv()
+
+load_dotenv(".env")
+if os.getenv("NODE_ENV") == "production":
+    load_dotenv(".env.production")
+
 
 DB_USER = os.getenv("DB_USER", "postgres")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")

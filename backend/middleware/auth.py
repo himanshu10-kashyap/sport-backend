@@ -10,7 +10,7 @@ from src.models.admin_model import Admin
 from src.models.permission_model import Permission
 
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
-ALGORITHM = os.getenv("JWT_ALGORITHM")
+ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 
 security = HTTPBearer()
 
@@ -74,6 +74,14 @@ def authorization(
                     detail="User not found"
                 )
 
+            if existing_user.status != "ACTIVE" or existing_user.is_deleted:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="User account is inactive"
+                )
+
+            role = existing_user.role.upper()
+
             if allowed_roles:
                 allowed = [r.upper() for r in allowed_roles]
 
@@ -88,7 +96,7 @@ def authorization(
                 (
                     await db.execute(
                         select(Permission).where(
-                            Permission.adminid == str(existing_user.userid)
+                            Permission.userid == str(existing_user.userid)
                         )
                     )
                 )

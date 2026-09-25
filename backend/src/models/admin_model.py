@@ -59,6 +59,6 @@ class Admin(Base):
     permissions = relationship(
         "Permission",
         back_populates="admin",
-        primaryjoin="Admin.userid == Permission.adminid",
+        primaryjoin="Admin.userid == Permission.userid",
     )
  

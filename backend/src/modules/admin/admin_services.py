@@ -35,6 +35,11 @@ logger = logging.getLogger(__name__)
 
 async def register_admin(db: AsyncSession, payload: AdminRegisterSchema):
     try:
+        if await db.scalar(select(func.count(Admin.id))):
+            return api_response_error(
+                "Admin registration is disabled", StatusCode.forbidden, []
+            )
+
         if await get_admin_by_username(db, payload.username):
             return api_response_error(
                 "Username already exists", StatusCode.conflict, []
@@ -51,6 +56,8 @@ async def register_admin(db: AsyncSession, payload: AdminRegisterSchema):
         )
 
         db.add(new_admin)
+        await db.flush()
+        db.add(Permission(userid=str(new_admin.userid), permission="ALL"))
         await db.commit()
         await db.refresh(new_admin)
 
@@ -99,7 +106,7 @@ async def login_admin(db: AsyncSession, payload: AdminLoginSchema):
                 StatusCode.success,
             )
 
-        if admin.status != "ACTIVE":
+        if admin.status != "ACTIVE" or admin.is_deleted:
             return api_response_error(
                 "Admin account is not active", StatusCode.forbidden, []
             )
@@ -157,7 +164,7 @@ async def create_sub_admin(
 
         if payload.permissions:
             permission_objects = [
-                Permission(adminid=str(sub_admin.userid), permission=perm)
+                Permission(userid=str(sub_admin.userid), permission=perm)
                 for perm in payload.permissions
             ]
             db.add_all(permission_objects)
@@ -188,7 +195,8 @@ async def sub_admin_permissions_edit(
     db: AsyncSession, userid: str, payload: UpdatePermissionSchema, current_user
 ):
     try:
-        if not await get_admin_by_userid(db, userid):
+        sub_admin = await get_admin_by_userid(db, userid)
+        if not sub_admin or sub_admin.role != "SUBADMIN":
             return api_response_error("Sub Admin not found", StatusCode.badRequest, [])
 
         if not payload.permissions:
@@ -196,10 +204,10 @@ async def sub_admin_permissions_edit(
                 "Permissions are required", StatusCode.badRequest, []
             )
 
-        await db.execute(delete(Permission).where(Permission.adminid == userid))
+        await db.execute(delete(Permission).where(Permission.userid == userid))
 
         permission_objects = [
-            Permission(adminid=userid, permission=permission)
+            Permission(userid=userid, permission=permission)
             for permission in payload.permissions
         ]
 
@@ -289,12 +297,12 @@ async def get_sub_admin_permission(db: AsyncSession, userid: str):
     try:
         admin = await get_admin_by_userid(db, userid)
 
-        if not admin:
-            return api_response_error("Admin not found", StatusCode.badRequest, [])
+        if not admin or admin.role != "SUBADMIN":
+            return api_response_error("Sub Admin not found", StatusCode.badRequest, [])
 
         permissions_result = await db.execute(
             select(Permission.permission)
-            .where(Permission.adminid == userid)
+            .where(Permission.userid == userid)
             .order_by(Permission.id.desc())
         )
 
@@ -323,12 +331,14 @@ async def get_sub_admin_permission(db: AsyncSession, userid: str):
 
 async def sub_admin_change_password(db, payload, current_user):
     try:
-        userid = payload.adminid
+        userid = payload.userid
 
         existing_admin = await get_admin_by_userid(db, userid)
 
-        if not existing_admin:
-            return api_response_error("Admin not found!", StatusCode.badRequest, [])
+        if not existing_admin or existing_admin.role != "SUBADMIN":
+            return api_response_error(
+                "Sub Admin not found!", StatusCode.badRequest, []
+            )
 
         if payload.newPassword != payload.confirmPassword:
             return api_response_error(
@@ -367,7 +377,9 @@ async def sub_admin_reset_password(db: AsyncSession, payload):
     try:
         result = await db.execute(
             select(Admin).where(
-                Admin.username == payload.username, Admin.is_reset == False
+                Admin.username == payload.username,
+                Admin.role == "SUBADMIN",
+                Admin.is_reset == False,
             )
         )
 
@@ -416,10 +428,11 @@ async def sub_admin_reset_password(db: AsyncSession, payload):
 
 async def delete_sub_admin_service(db: AsyncSession, userid: str):
     try:
-        if not await get_admin_by_userid(db, userid):
+        sub_admin = await get_admin_by_userid(db, userid)
+        if not sub_admin or sub_admin.role != "SUBADMIN":
             return api_response_error("SubAdmin not found", StatusCode.badRequest, [])
 
-        await db.execute(delete(Permission).where(Permission.adminid == userid))
+        await db.execute(delete(Permission).where(Permission.userid == userid))
 
         result = await db.execute(delete(Admin).where(Admin.userid == userid))
 

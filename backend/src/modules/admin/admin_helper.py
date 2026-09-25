@@ -46,9 +46,9 @@ def serialize_admin(admin: Admin) -> dict:
     }
 
 
-async def get_permission_list(db: AsyncSession, admin_userid: str) -> list:
+async def get_permission_list(db: AsyncSession, userid: str) -> list:
     result = await db.execute(
-        select(Permission.permission).where(Permission.adminid == admin_userid)
+        select(Permission.permission).where(Permission.userid == userid)
     )
     return [p for p in result.scalars().all()]
 

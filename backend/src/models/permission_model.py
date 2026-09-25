@@ -22,7 +22,7 @@ class Permission(Base):
         autoincrement=True
     )
 
-    adminid = Column(
+    userid = Column(
         UUID(as_uuid=True),
         ForeignKey(
             "admins.userid",
@@ -52,5 +52,5 @@ class Permission(Base):
     admin = relationship(
         "Admin",
         back_populates="permissions",
-        primaryjoin="Admin.userid == Permission.adminid",
+        primaryjoin="Admin.userid == Permission.userid",
     )
