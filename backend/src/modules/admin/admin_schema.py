@@ -24,7 +24,7 @@ class UpdatePermissionSchema(BaseModel):
 
 
 class SubAdminChangePasswordSchema(BaseModel):
-    userid: str = Field(..., alias="adminid")
+    userid: str
     newPassword: str = Field(..., min_length=6)
     confirmPassword: str = Field(..., min_length=6)
 

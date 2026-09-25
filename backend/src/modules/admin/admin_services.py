@@ -215,7 +215,7 @@ async def sub_admin_permissions_edit(
         await db.commit()
 
         return api_response_success(
-            {"adminid": userid, "permissions": payload.permissions},
+            {"userid": userid, "permissions": payload.permissions},
             "permissions updated successfully",
             StatusCode.success,
         )
@@ -264,7 +264,7 @@ async def get_all_sub_admins(db: AsyncSession, pagination: PaginationSchema):
         users = [
             {
                 "id": str(admin.id),
-                "adminid": str(admin.userid),
+                "userid": str(admin.userid),
                 "username": admin.username,
                 "role": admin.role,
             }
@@ -310,7 +310,7 @@ async def get_sub_admin_permission(db: AsyncSession, userid: str):
 
         return api_response_success(
             {
-                "adminid": str(admin.userid),
+                "userid": str(admin.userid),
                 "id": str(admin.id),
                 "username": admin.username,
                 "role": admin.role,
