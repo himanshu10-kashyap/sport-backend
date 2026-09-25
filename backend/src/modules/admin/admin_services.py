@@ -293,12 +293,24 @@ async def get_all_sub_admins(db: AsyncSession, pagination: PaginationSchema):
         return api_response_error(str(e), StatusCode.internalServerError, [])
 
 
-async def get_sub_admin_permission(db: AsyncSession, userid: str):
+async def get_sub_admin_permission(
+    db: AsyncSession, userid: str, current_user
+):
     try:
         admin = await get_admin_by_userid(db, userid)
 
         if not admin or admin.role != "SUBADMIN":
             return api_response_error("Sub Admin not found", StatusCode.badRequest, [])
+
+        if (
+            current_user.role.upper() == "SUBADMIN"
+            and str(admin.userid) != str(current_user.userid)
+        ):
+            return api_response_error(
+                "Access denied: cannot view another subadmin's permissions",
+                StatusCode.forbidden,
+                [],
+            )
 
         permissions_result = await db.execute(
             select(Permission.permission)
