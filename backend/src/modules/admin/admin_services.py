@@ -28,6 +28,7 @@ from utils.common_schema import (
     api_response_success,
 )
 from utils.jwt import create_access_token
+from utils.rate_limit import invalidate_rate_limit_cache
 from utils.status_code import StatusCode
 
 logger = logging.getLogger(__name__)
@@ -487,6 +488,7 @@ async def update_rate_limit_setting(db: AsyncSession, value: int):
             )
 
         await set_rate_limit_value(db, value)
+        invalidate_rate_limit_cache()
 
         return api_response_success(
             {"value": value},

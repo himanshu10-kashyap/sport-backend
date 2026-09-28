@@ -1,11 +1,10 @@
 from jose import jwt, JWTError, ExpiredSignatureError
-from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from typing import Optional
 import os
-
+from dotenv import load_dotenv
 from fastapi import Depends, HTTPException
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from src.config.database import get_db
@@ -13,7 +12,8 @@ from src.config.database import get_db
 load_dotenv()
 
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
-ALGORITHM  = os.getenv("JWT_ALGORITHM", "HS256")
+ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+
 
 ACCESS_TOKEN_EXPIRE_MINUTES = 15
 REFRESH_TOKEN_EXPIRE_DAYS   = 30

@@ -1,29 +1,33 @@
 # backend/server.py
 
 import os
-import sys
-import subprocess
-
+from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-
-# Load Environment
-load_dotenv(".env")
-
-if os.getenv("NODE_ENV") == "production":
-    load_dotenv(".env.production")
-
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 import uvicorn
 
+from utils.redis import close_redis_client
+
+
+load_dotenv(".env")
+if os.getenv("NODE_ENV") == "production":
+    load_dotenv(".env.production")
+
 # Auto-create missing database tables on startup
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    yield
+    await close_redis_client()
+
 
 app = FastAPI(
     title="SCORE",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 
@@ -44,8 +48,10 @@ app.add_middleware(
 )
 
 from src.modules.admin.admin_routes import router as admin_router
+from src.modules.cricket.cricket_routes import router as cricket_router
 
 app.include_router(admin_router)
+app.include_router(cricket_router)
 
 from utils.rate_limit import DynamicRateLimitMiddleware
 
@@ -58,6 +64,6 @@ if __name__ == "__main__":
         "server:app",
         host="localhost",
         # host="0.0.0.0",
-        port=int(os.getenv("PORT", 8001)),
-        reload=os.getenv("NODE_ENV") != "production"
+        port=int(os.getenv("PORT", "8001")),
+        reload=os.getenv("NODE_ENV", "development") != "production"
     )
