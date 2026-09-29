@@ -63,6 +63,17 @@ def _env_prefixes(name: str, fallback: str) -> tuple[str, ...]:
 
 
 class DynamicRateLimitMiddleware(BaseHTTPMiddleware):
+    # Per-IP user limiter. Deliberately off.
+    #
+    # It runs before the route handler, so it rejects a user before Redis is
+    # ever consulted - and every cricket response is a cheap cache read
+    # (stale data is served while a refresh runs in the background). The
+    # only effect of turning this on is 429ing requests that the cache
+    # would have answered in ~80ms. Provider pressure is handled by the
+    # outbound limiter in the cricket client, which is driven by the
+    # admin-set value.
+    ENABLED = False
+
     def __init__(
         self,
         app,
@@ -72,7 +83,7 @@ class DynamicRateLimitMiddleware(BaseHTTPMiddleware):
         excluded_paths: tuple[str, ...] | None = None,
     ):
         super().__init__(app)
-        self.enabled = _env_bool("USER_RATE_LIMIT_ENABLED", True)
+        self.enabled = self.ENABLED
         # Flip USER_RATE_LIMIT_TRUST_PROXY to 1 when deploying behind a load
         # balancer, ALB or Cloudflare. Without it every request resolves to the
         # proxy's IP, so all users share one bucket and the first one to be

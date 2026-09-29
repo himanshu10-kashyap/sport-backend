@@ -18,6 +18,11 @@ from utils.redis import (
 )
 
 
+# Only used when the rate_limit table cannot be read at all. The admin-set
+# value in the DB is the real source of truth.
+RATE_LIMIT_FALLBACK_SECONDS = 2.0
+
+
 def _env_float(name: str, fallback: float) -> float:
     try:
         return float(os.getenv(name, str(fallback)))
@@ -103,11 +108,13 @@ class SportsAPI365Client:
             if max_retries is not None
             else int(os.getenv("SPORTS_API_MAX_RETRIES", "2")),
         )
+        # Provider call spacing comes from the admin-set value in the DB.
+        # The literal below is only a last resort if the DB is unreachable.
         self.rate_limit_seconds = max(
             0.0,
             rate_limit_seconds
             if rate_limit_seconds is not None
-            else float(os.getenv("API_RATE_LIMIT_SECONDS", "2")),
+            else RATE_LIMIT_FALLBACK_SECONDS,
         )
         self.rate_limit_getter = rate_limit_getter
         if self.rate_limit_getter is None and rate_limit_seconds is None:
