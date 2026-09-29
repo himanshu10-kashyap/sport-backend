@@ -1,8 +1,17 @@
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from math import ceil
 from typing import Any
 
-from utils.common_schema import api_response_error, api_response_success
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.models.advertisement_model import Advertisement
+from utils.common_schema import (
+    PaginationSchema,
+    api_response_error,
+    api_response_success,
+)
 from utils.redis import CachedUpstreamError
 from utils.status_code import StatusCode
 
@@ -10,6 +19,8 @@ from .cricket_external_api import (
     CricketExternalAPIError,
     cricket_external_api,
 )
+
+logger = logging.getLogger(__name__)
 
 
 CricketRequest = Callable[..., Awaitable[Any]]
@@ -495,3 +506,73 @@ async def search_cricket(
         cricket_external_api.search,
         params=params,
     )
+
+
+async def get_cricket_advertisements(
+    db: AsyncSession, pagination: PaginationSchema
+):
+    try:
+        page = pagination.page
+        page_size = pagination.pageSize
+        search = pagination.search
+
+        query = (
+            select(Advertisement)
+            .where(Advertisement.title.ilike(f"%{search}%"))
+            .order_by(Advertisement.created_at.desc())
+        )
+
+        total_items = (
+            await db.execute(select(func.count()).select_from(query.subquery()))
+        ).scalar() or 0
+
+        if total_items == 0:
+            return api_response_success(
+                [],
+                "No data found",
+                StatusCode.success,
+                {"page": page, "pageSize": page_size, "totalPages": 0, "totalItems": 0},
+            )
+
+        offset = (page - 1) * page_size
+
+        advertisements = (
+            (await db.execute(query.offset(offset).limit(page_size)))
+            .scalars()
+            .all()
+        )
+
+        ads = [
+            {
+                "id": advertisement.id,
+                "title": advertisement.title,
+                "description": advertisement.description,
+                "file": advertisement.file,
+                "createdAt": advertisement.created_at.isoformat()
+                if advertisement.created_at
+                else None,
+            }
+            for advertisement in advertisements
+        ]
+
+        total_pages = (total_items + page_size - 1) // page_size
+
+        pagination_data = {
+            "page": page,
+            "pageSize": page_size,
+            "totalPages": total_pages,
+            "totalItems": total_items,
+        }
+
+        return api_response_success(
+            ads,
+            "Advertisements fetched successfully",
+            StatusCode.success,
+            pagination_data,
+        )
+
+    except Exception as e:
+        await db.rollback()
+        print("Error In Fetching Advertisements:", e)
+
+        return api_response_error(str(e), StatusCode.internalServerError, [])

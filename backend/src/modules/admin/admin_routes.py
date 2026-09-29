@@ -1,10 +1,14 @@
-from fastapi import APIRouter, Depends
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config.database import get_db
 from src.modules.admin.admin_schema import (
     AdminLoginSchema,
     AdminRegisterSchema,
+    AdvertisementCreateSchema,
+    AdvertisementUpdateSchema,
     CreateSubAdminSchema,
     RateLimitSchema,
     SubAdminChangePasswordSchema,
@@ -12,8 +16,11 @@ from src.modules.admin.admin_schema import (
     UpdatePermissionSchema,
 )
 from src.modules.admin.admin_services import (
+    create_advertisement,
     create_sub_admin,
+    delete_advertisement,
     delete_sub_admin_service,
+    get_all_advertisements,
     get_all_sub_admins,
     get_rate_limit_setting,
     get_sub_admin_permission,
@@ -22,6 +29,7 @@ from src.modules.admin.admin_services import (
     sub_admin_change_password,
     sub_admin_permissions_edit,
     sub_admin_reset_password,
+    update_advertisement,
     update_rate_limit_setting,
 )
 from middleware.auth import authorization
@@ -135,3 +143,60 @@ async def edit_rate_limit(
     ),
 ):
     return await update_rate_limit_setting(db, payload.value)
+
+
+@router.post("/advertisements")
+async def add_advertisement(
+    payload: Annotated[AdvertisementCreateSchema, Form()],
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(
+        authorization(
+            allowed_roles=["ADMIN", "SUBADMIN"],
+            required_permissions=["advertisement"],
+        )
+    ),
+):
+    return await create_advertisement(db, payload)
+
+
+@router.put("/advertisements/{advertisement_id}")
+async def edit_advertisement(
+    advertisement_id: int,
+    payload: Annotated[AdvertisementUpdateSchema, Form()],
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(
+        authorization(
+            allowed_roles=["ADMIN", "SUBADMIN"],
+            required_permissions=["advertisement"],
+        )
+    ),
+):
+    return await update_advertisement(db, advertisement_id, payload)
+
+
+@router.delete("/advertisements/{advertisement_id}")
+async def remove_advertisement(
+    advertisement_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(
+        authorization(
+            allowed_roles=["ADMIN", "SUBADMIN"],
+            required_permissions=["advertisement"],
+        )
+    ),
+):
+    return await delete_advertisement(db, advertisement_id)
+
+
+@router.get("/advertisements")
+async def fetch_advertisements(
+    pagination: PaginationSchema = Depends(),
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(
+        authorization(
+            allowed_roles=["ADMIN", "SUBADMIN"],
+            required_permissions=["advertisement"],
+        )
+    ),
+):
+    return await get_all_advertisements(db=db, pagination=pagination)

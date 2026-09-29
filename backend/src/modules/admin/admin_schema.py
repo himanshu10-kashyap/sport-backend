@@ -1,5 +1,6 @@
 from typing import List
 
+from fastapi import UploadFile
 from pydantic import BaseModel, Field
 
 
@@ -37,3 +38,31 @@ class SubAdminResetPasswordSchema(BaseModel):
 
 class RateLimitSchema(BaseModel):
     value: int = Field(..., ge=1)
+
+
+class AdvertisementCreateSchema(BaseModel):
+    title: str = Field(..., min_length=1, max_length=255)
+    description: str | None = None
+    file: UploadFile
+
+    def clean_title(self) -> str:
+        return self.title.strip()
+
+    def clean_description(self) -> str | None:
+        return (self.description or "").strip() or None
+
+
+class AdvertisementUpdateSchema(BaseModel):
+    title: str | None = Field(None, min_length=1, max_length=255)
+    description: str | None = None
+    file: UploadFile | None = None
+
+    def clean_title(self) -> str | None:
+        return self.title.strip() if self.title is not None else None
+
+    def clean_description(self) -> str | None:
+        return (self.description or "").strip() or None
+
+    def has_new_file(self) -> bool:
+        return self.file is not None and bool(self.file.filename)
+

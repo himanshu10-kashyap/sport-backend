@@ -15,12 +15,15 @@ from src.modules.admin.admin_helper import (
 from src.modules.admin.admin_schema import (
     AdminLoginSchema,
     AdminRegisterSchema,
+    AdvertisementCreateSchema,
+    AdvertisementUpdateSchema,
     CreateSubAdminSchema,
     SubAdminChangePasswordSchema,
     SubAdminResetPasswordSchema,
     UpdatePermissionSchema,
 )
 from src.models.admin_model import Admin
+from src.models.advertisement_model import Advertisement
 from src.models.permission_model import Permission
 from utils.common_schema import (
     PaginationSchema,
@@ -29,9 +32,12 @@ from utils.common_schema import (
 )
 from utils.jwt import create_access_token
 from utils.rate_limit import invalidate_rate_limit_cache
+from utils.s3 import delete_file_from_s3_async, upload_file_to_s3_async
 from utils.status_code import StatusCode
 
 logger = logging.getLogger(__name__)
+
+ADVERTISEMENT_S3_FOLDER = "advertisements"
 
 
 async def register_admin(db: AsyncSession, payload: AdminRegisterSchema):
@@ -499,3 +505,230 @@ async def update_rate_limit_setting(db: AsyncSession, value: int):
         await db.rollback()
         logger.exception("update_rate_limit_setting failed")
         return api_response_error(str(e), StatusCode.internalServerError, [])
+
+
+async def get_advertisement_by_id(db: AsyncSession, advertisement_id: int):
+    result = await db.execute(
+        select(Advertisement).where(Advertisement.id == advertisement_id)
+    )
+    return result.scalars().first()
+
+
+async def create_advertisement(
+    db: AsyncSession,
+    payload: AdvertisementCreateSchema,
+):
+    uploaded_url = None
+    try:
+        title = payload.clean_title()
+        if not title:
+            return api_response_error(
+                "Title is required", StatusCode.badRequest, []
+            )
+
+        try:
+            uploaded_url = await upload_file_to_s3_async(
+                payload.file, folder=ADVERTISEMENT_S3_FOLDER
+            )
+        except ValueError as e:
+            return api_response_error(str(e), StatusCode.badRequest, [])
+
+        advertisement = Advertisement(
+            title=title,
+            description=payload.clean_description(),
+            file=uploaded_url,
+        )
+
+        db.add(advertisement)
+        await db.commit()
+        await db.refresh(advertisement)
+
+        return api_response_success(
+            {
+                "id": advertisement.id,
+                "title": advertisement.title,
+                "description": advertisement.description,
+                "file": advertisement.file,
+                "createdAt": advertisement.created_at.isoformat()
+                if advertisement.created_at
+                else None,
+            },
+            "Advertisement created successfully",
+            StatusCode.create,
+        )
+
+    except Exception as e:
+        await db.rollback()
+        if uploaded_url:
+            await delete_file_from_s3_async(uploaded_url)
+        print("Error In Creating Advertisement:", e)
+
+        return api_response_error(str(e), StatusCode.internalServerError, [])
+
+
+async def update_advertisement(
+    db: AsyncSession,
+    advertisement_id: int,
+    payload: AdvertisementUpdateSchema,
+):
+    previous_file = None
+    try:
+        advertisement = await get_advertisement_by_id(db, advertisement_id)
+        if not advertisement:
+            return api_response_error(
+                "Advertisement not found", StatusCode.notFound, []
+            )
+
+        if payload.title is not None:
+            title = payload.clean_title()
+            if not title:
+                return api_response_error(
+                    "Title cannot be empty", StatusCode.badRequest, []
+                )
+            advertisement.title = title
+
+        if payload.description is not None:
+            advertisement.description = payload.clean_description()
+
+        if payload.has_new_file():
+            try:
+                uploaded_url = await upload_file_to_s3_async(
+                    payload.file, folder=ADVERTISEMENT_S3_FOLDER
+                )
+            except ValueError as e:
+                return api_response_error(str(e), StatusCode.badRequest, [])
+
+            previous_file = advertisement.file
+            advertisement.file = uploaded_url
+
+        await db.commit()
+        await db.refresh(advertisement)
+
+        if previous_file:
+            await delete_file_from_s3_async(previous_file)
+
+        return api_response_success(
+            {
+                "id": advertisement.id,
+                "title": advertisement.title,
+                "description": advertisement.description,
+                "file": advertisement.file,
+                "createdAt": advertisement.created_at.isoformat()
+                if advertisement.created_at
+                else None,
+            },
+            "Advertisement updated successfully",
+            StatusCode.success,
+        )
+
+    except Exception as e:
+        await db.rollback()
+        print("Error In Updating Advertisement:", e)
+
+        return api_response_error(str(e), StatusCode.internalServerError, [])
+
+
+async def delete_advertisement(db: AsyncSession, advertisement_id: int):
+    try:
+        advertisement = await get_advertisement_by_id(db, advertisement_id)
+        if not advertisement:
+            return api_response_error(
+                "Advertisement not found", StatusCode.notFound, []
+            )
+
+        stored_file = advertisement.file
+
+        result = await db.execute(
+            delete(Advertisement).where(
+                Advertisement.id == advertisement_id
+            )
+        )
+
+        if result.rowcount == 0:
+            return api_response_error(
+                "Advertisement not found", StatusCode.notFound, []
+            )
+
+        await db.commit()
+        await delete_file_from_s3_async(stored_file)
+
+        return api_response_success(
+            [], "Advertisement deleted successfully", StatusCode.success
+        )
+
+    except Exception as e:
+        await db.rollback()
+        print("Error In Deleting Advertisement:", e)
+
+        return api_response_error(str(e), StatusCode.internalServerError, [])
+
+
+async def get_all_advertisements(
+    db: AsyncSession, pagination: PaginationSchema
+):
+    try:
+        page = pagination.page
+        page_size = pagination.pageSize
+        search = pagination.search
+
+        query = (
+            select(Advertisement)
+            .where(Advertisement.title.ilike(f"%{search}%"))
+            .order_by(Advertisement.created_at.desc())
+        )
+
+        total_items = (
+            await db.execute(select(func.count()).select_from(query.subquery()))
+        ).scalar() or 0
+
+        if total_items == 0:
+            return api_response_success(
+                [],
+                "No data found",
+                StatusCode.success,
+                {"page": page, "pageSize": page_size, "totalPages": 0, "totalItems": 0},
+            )
+
+        offset = (page - 1) * page_size
+
+        advertisements = (
+            (await db.execute(query.offset(offset).limit(page_size)))
+            .scalars()
+            .all()
+        )
+
+        ads = [
+            {
+                "id": advertisement.id,
+                "title": advertisement.title,
+                "description": advertisement.description,
+                "file": advertisement.file,
+                "createdAt": advertisement.created_at.isoformat()
+                if advertisement.created_at
+                else None,
+            }
+            for advertisement in advertisements
+        ]
+
+        total_pages = (total_items + page_size - 1) // page_size
+
+        pagination_data = {
+            "page": page,
+            "pageSize": page_size,
+            "totalPages": total_pages,
+            "totalItems": total_items,
+        }
+
+        return api_response_success(
+            ads,
+            "Advertisements fetched successfully",
+            StatusCode.success,
+            pagination_data,
+        )
+
+    except Exception as e:
+        await db.rollback()
+        print("Error In Fetching Advertisements:", e)
+
+        return api_response_error(str(e), StatusCode.internalServerError, [])
+

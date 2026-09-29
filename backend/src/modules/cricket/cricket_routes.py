@@ -1,7 +1,12 @@
 from fastapi import APIRouter, Depends, Path, Request
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.config.database import get_db
+from utils.common_schema import PaginationSchema
 
 from .cricket_services import (
     get_cricket_event,
+    get_cricket_advertisements,
     get_cricket_event_ball_by_ball,
     get_cricket_event_best_players,
     get_cricket_event_enrichment,
@@ -474,3 +479,11 @@ async def fetch_cricket_search(
     params: dict[str, str] = Depends(get_query_params),
 ):
     return await search_cricket(params=params)
+
+
+@router.get("/advertisements")
+async def fetch_cricket_advertisements(
+    pagination: PaginationSchema = Depends(),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_cricket_advertisements(db=db, pagination=pagination)
