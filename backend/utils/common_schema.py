@@ -46,11 +46,13 @@ def api_response_success(
 def api_response_error(
     message: str = "Something went wrong",
     status_code: int = 500,
-    data=None
+    data=None,
+    headers=None
 ):
 
     return JSONResponse(
         status_code=status_code,
+        headers=headers or None,
         content={
             "success": False,
             "status_code": status_code,

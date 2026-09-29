@@ -43,10 +43,18 @@ return 0
 _redis_client: Redis | None = None
 _redis_lock = asyncio.Lock()
 _redis_disabled_until = 0.0
+_redis_last_failure_at: float | None = None
 
 
 class UpstreamRateLimitUnavailable(RuntimeError):
     """Raised when Redis cannot enforce the upstream quota."""
+
+
+def _env_float(name: str, fallback: float) -> float:
+    try:
+        return float(os.getenv(name, str(fallback)))
+    except (TypeError, ValueError):
+        return fallback
 
 
 def _redis_protocol() -> int:
@@ -67,6 +75,26 @@ def _redis_max_connections() -> int:
         return 300
 
 
+def _redis_connect_timeout() -> float:
+    # Not 0.5 as it used to be. REDIS_URL points at a remote host whose
+    # measured RTT is 190-310 ms, so half a second left a 1.6x margin and a
+    # single network blip failed every cricket request. Two seconds still
+    # fails fast enough to be worth retrying.
+    return max(0.1, _env_float("REDIS_CONNECT_TIMEOUT_SECONDS", 2.0))
+
+
+def _redis_socket_timeout() -> float:
+    return max(0.1, _env_float("REDIS_SOCKET_TIMEOUT_SECONDS", 2.0))
+
+
+def _redis_disable_seconds() -> float:
+    # How long the breaker stays open once it trips, and how close together
+    # two failures have to be to count as sustained rather than as noise.
+    # Kept short: the whole point of the SWR cache is that a moment of Redis
+    # pain should cost a retried request, not half a minute of 429/503.
+    return max(0.0, _env_float("REDIS_DISABLE_SECONDS", 2.0))
+
+
 def _is_pool_exhausted(error: BaseException) -> bool:
     return type(error).__name__ == "MaxConnectionsError"
 
@@ -79,8 +107,8 @@ def _create_redis_client() -> Redis | None:
         return Redis.from_url(
             redis_url,
             decode_responses=True,
-            socket_connect_timeout=0.5,
-            socket_timeout=0.5,
+            socket_connect_timeout=_redis_connect_timeout(),
+            socket_timeout=_redis_socket_timeout(),
             health_check_interval=30,
             protocol=_redis_protocol(),
             max_connections=_redis_max_connections(),
@@ -89,9 +117,25 @@ def _create_redis_client() -> Redis | None:
         return None
 
 
-def _disable_redis() -> None:
-    global _redis_disabled_until
-    _redis_disabled_until = time.monotonic() + 30
+def _note_redis_failure() -> None:
+    """Open the breaker only when the failure is sustained, not a blip.
+
+    A single slow round trip to a remote Redis is noise. Two failures close
+    together is the outage. Keyed on the timestamp of the previous failure
+    rather than a counter, because a successful ping is not evidence that
+    the command which just timed out will behave next time - counting
+    successes let one slow eval per request reset the tally and the breaker
+    never opened at all.
+    """
+    global _redis_disabled_until, _redis_last_failure_at
+    now = time.monotonic()
+    window = _redis_disable_seconds()
+    if (
+        _redis_last_failure_at is not None
+        and now - _redis_last_failure_at <= window
+    ):
+        _redis_disabled_until = now + window
+    _redis_last_failure_at = now
 
 
 async def _get_available_redis_client() -> Redis | None:
@@ -108,7 +152,7 @@ async def _get_available_redis_client() -> Redis | None:
             _redis_client = _create_redis_client()
 
         if _redis_client is None:
-            _disable_redis()
+            _note_redis_failure()
             return None
 
         try:
@@ -116,7 +160,7 @@ async def _get_available_redis_client() -> Redis | None:
         except Exception as error:
             if _is_pool_exhausted(error):
                 return _redis_client
-            _disable_redis()
+            _note_redis_failure()
             try:
                 await _redis_client.aclose()
             except Exception:
@@ -136,11 +180,13 @@ async def redis_is_available() -> bool:
 
 
 async def close_redis_client() -> None:
-    global _redis_client
+    global _redis_client, _redis_disabled_until, _redis_last_failure_at
 
     async with _redis_lock:
         client = _redis_client
         _redis_client = None
+        _redis_disabled_until = 0.0
+        _redis_last_failure_at = None
         if client is None:
             return
         try:
@@ -190,7 +236,7 @@ async def acquire_rate_limit_slot(
             )
         except Exception as error:
             if not _is_pool_exhausted(error):
-                _disable_redis()
+                _note_redis_failure()
             raise UpstreamRateLimitUnavailable(
                 "Redis unreachable — cannot enforce rate limit"
             ) from error
@@ -229,7 +275,7 @@ async def try_acquire_rate_limit_slot(
         )
     except Exception as error:
         if not _is_pool_exhausted(error):
-            _disable_redis()
+            _note_redis_failure()
         raise UpstreamRateLimitUnavailable(
             "Redis unreachable — cannot enforce rate limit"
         ) from error
@@ -246,7 +292,7 @@ async def retry_after_seconds(key: str, interval: float) -> float:
         last = await client.get(key)
     except Exception as error:
         if not _is_pool_exhausted(error):
-            _disable_redis()
+            _note_redis_failure()
         return float(interval)
 
     if not last:
@@ -269,7 +315,7 @@ async def cache_get(key: str) -> Any:
         raw = await client.get(key)
     except Exception as error:
         if not _is_pool_exhausted(error):
-            _disable_redis()
+            _note_redis_failure()
         return None
 
     if not raw:
@@ -303,7 +349,7 @@ async def cache_set(key: str, value: Any, ttl: float) -> bool:
         return True
     except Exception as error:
         if not _is_pool_exhausted(error):
-            _disable_redis()
+            _note_redis_failure()
         return False
 
 
@@ -322,7 +368,7 @@ async def _acquire_cache_lock(key: str, ttl: float, token: str) -> bool:
         return bool(acquired)
     except Exception as error:
         if not _is_pool_exhausted(error):
-            _disable_redis()
+            _note_redis_failure()
         return False
 
 
@@ -335,7 +381,7 @@ async def _release_cache_lock(key: str, token: str) -> None:
         await client.eval(_RELEASE_LOCK_SCRIPT, 1, key, token)
     except Exception as error:
         if not _is_pool_exhausted(error):
-            _disable_redis()
+            _note_redis_failure()
 
 
 _CACHE_ERROR_MARKER = "__cached_error__"
@@ -422,7 +468,7 @@ async def cache_set_swr(
         return True
     except Exception as error:
         if not _is_pool_exhausted(error):
-            _disable_redis()
+            _note_redis_failure()
         return False
 
 

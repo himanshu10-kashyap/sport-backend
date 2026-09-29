@@ -1,4 +1,5 @@
 from collections.abc import Awaitable, Callable, Mapping
+from math import ceil
 from typing import Any
 
 from utils.common_schema import api_response_error, api_response_success
@@ -14,6 +15,22 @@ from .cricket_external_api import (
 CricketRequest = Callable[..., Awaitable[Any]]
 
 
+def _retry_after_headers(error: Any) -> dict | None:
+    """Build a Retry-After header when we know when the slot frees up.
+
+    The 429/503 pair is the only thing standing between a caller and a
+    tight retry loop, and without this header the client has to guess.
+    """
+    seconds = getattr(error, "retry_after", None)
+    if seconds is None:
+        return None
+    try:
+        value = max(1, ceil(float(seconds)))
+    except (TypeError, ValueError):
+        return None
+    return {"Retry-After": str(value)}
+
+
 async def _fetch_cricket_data(
     request: CricketRequest,
     **kwargs: Any,
@@ -26,9 +43,15 @@ async def _fetch_cricket_data(
             error.message,
             error.status_code or StatusCode.internalServerError,
             None,
+            headers=_retry_after_headers(error),
         )
     except CricketExternalAPIError as error:
-        return api_response_error(error.message, error.status_code, None)
+        return api_response_error(
+            error.message,
+            error.status_code,
+            None,
+            headers=_retry_after_headers(error),
+        )
     except ValueError:
         return api_response_error(
             "Invalid cricket request", StatusCode.badRequest, None

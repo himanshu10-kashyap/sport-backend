@@ -23,6 +23,12 @@ from utils.redis import (
 # value in the DB is the real source of truth.
 RATE_LIMIT_FALLBACK_SECONDS = 2.0
 
+# Ceiling on the backoff we advertise to clients. The admin-set interval has
+# no upper bound by design, so without this a value of 100000 answered every
+# request with "Retry-After: 100000" - a client that obeyed it would wait
+# 27 hours for a request that is refused in 10 seconds anyway.
+RETRY_AFTER_MAX_SECONDS = 30.0
+
 
 def _env_float(name: str, fallback: float) -> float:
     try:
@@ -39,10 +45,19 @@ def _env_bool(name: str, fallback: bool) -> bool:
 
 
 class CricketExternalAPIError(Exception):
-    def __init__(self, message: str, status_code: int = 502):
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 502,
+        retry_after: float | None = None,
+    ):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+        # Seconds the client should back off for. Set whenever we know when
+        # the slot frees up, so the 429/503 carry a Retry-After instead of
+        # leaving the client to guess.
+        self.retry_after = retry_after
 
 
 class SportsAPI365Client:
@@ -183,6 +198,14 @@ class SportsAPI365Client:
             0.0,
             _env_float("EXTERNAL_API_RATE_LIMIT_MAX_WAIT_SECONDS", 2.0),
         )
+        # The admin-set rate limit has no upper bound, and the slot wait used
+        # to be the full interval, so value=100000 hung a cold-miss request
+        # for 27 hours. Cap the wait instead of the value: throttling total
+        # call rate is the setting's job, hanging a request is not.
+        self.request_max_wait = max(
+            0.0,
+            _env_float("EXTERNAL_API_REQUEST_MAX_WAIT_SECONDS", 10.0),
+        )
         self.case_insensitive_params = frozenset(
             name.strip().lower()
             for name in os.getenv(
@@ -223,7 +246,13 @@ class SportsAPI365Client:
             value = cleaned[key]
             if str(key).lower() in self.case_insensitive_params:
                 value = str(value).strip().lower()
-            normalized.append(f"{key}={value}")
+            # Length-prefix the value. Joining with a bare "key=value&key=value"
+            # is ambiguous, so ?q=india&type=T20 and ?q=india%26type%3DT20
+            # produced the same key and one request's response was served
+            # for the other. Param names can never contain & or = per the URL
+            # spec, so prefixing the value alone makes this injective.
+            text = str(value)
+            normalized.append(f"{key}={len(text)}:{text}")
 
         canonical = resolved_path or path
         if normalized:
@@ -295,6 +324,7 @@ class SportsAPI365Client:
             raise CricketExternalAPIError(
                 "Redis rate-limit key is not configured",
                 503,
+                retry_after=self.request_max_wait or 10.0,
             )
 
         try:
@@ -307,6 +337,9 @@ class SportsAPI365Client:
             raise CricketExternalAPIError(
                 "Redis is unreachable; SportsAPI365 rate limit cannot be enforced",
                 503,
+                # The breaker reopens shortly, so point the client at the
+                # short window rather than the full rate-limit interval.
+                retry_after=min(max_wait or 2.0, RETRY_AFTER_MAX_SECONDS),
             ) from exc
 
         if acquired:
@@ -328,8 +361,15 @@ class SportsAPI365Client:
         response: httpx.Response,
     ) -> CricketExternalAPIError:
         if response.status_code == 429:
+            raw = response.headers.get("Retry-After")
+            try:
+                retry_after = float(raw) if raw else None
+            except ValueError:
+                retry_after = None
             return CricketExternalAPIError(
-                "SportsAPI365 rate limit exceeded", 429
+                "SportsAPI365 rate limit exceeded",
+                429,
+                retry_after=min(max(retry_after or 0.0, 0.0), 10.0) or None,
             )
         if response.status_code in {401, 403}:
             return CricketExternalAPIError(
@@ -399,7 +439,12 @@ class SportsAPI365Client:
         for attempt in range(self.max_retries + 1):
             if not await self._wait_for_rate_limit(max_wait):
                 raise CricketExternalAPIError(
-                    "Cricket data is busy, please retry shortly", 429
+                    "Cricket data is busy, please retry shortly",
+                    429,
+                    retry_after=min(
+                        await self._get_rate_limit_seconds(),
+                        RETRY_AFTER_MAX_SECONDS,
+                    ),
                 )
             try:
                 if self.client is not None:
@@ -472,7 +517,9 @@ class SportsAPI365Client:
             return await self._fetch(url, query_params, headers)
 
         key = self._build_cache_key(path, query_params, resolved_path)
-        loader = lambda: self._fetch(url, query_params, headers)
+        loader = lambda: self._fetch(
+            url, query_params, headers, max_wait=self.request_max_wait
+        )
         # A background refresh is optional, so it gives up quickly rather
         # than holding a worker while the user already has data on screen.
         refresh_loader = lambda: self._fetch(
