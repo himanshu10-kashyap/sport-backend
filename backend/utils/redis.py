@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import time
 import uuid
@@ -8,6 +9,9 @@ from typing import Any
 
 from dotenv import load_dotenv
 from redis.asyncio import Redis
+
+
+logger = logging.getLogger(__name__)
 
 
 load_dotenv(".env")
@@ -141,15 +145,33 @@ async def close_redis_client() -> None:
             pass
 
 
-async def acquire_rate_limit_slot(key: str, interval: float) -> bool:
+async def acquire_rate_limit_slot(
+    key: str,
+    interval: float,
+    max_wait: float | None = None,
+) -> bool | None:
+    """Try to take the slot.
+
+    True  - slot taken, go ahead
+    False - Redis is healthy but the slot stayed busy for the whole budget
+    None  - Redis is unavailable, caller may fall back to a local throttle
+    """
     if interval <= 0:
         return True
 
     client = await _get_available_redis_client()
     if client is None:
-        return False
+        return None
 
-    deadline = time.monotonic() + max(1.0, float(interval) + 1.0)
+    # Without max_wait the caller accepts the full interval. Callers that
+    # must not block a user request pass max_wait to give up early and let
+    # them serve stale data instead.
+    budget = (
+        max(1.0, float(interval) + 1.0)
+        if max_wait is None
+        else max(0.0, float(max_wait))
+    )
+    deadline = time.monotonic() + budget
     while time.monotonic() < deadline:
         try:
             wait_milliseconds = int(
@@ -165,7 +187,7 @@ async def acquire_rate_limit_slot(key: str, interval: float) -> bool:
         except Exception as error:
             if not _is_pool_exhausted(error):
                 _disable_redis()
-            return False
+            return None
 
         if wait_milliseconds <= 0:
             return True
@@ -307,6 +329,91 @@ async def _release_cache_lock(key: str, token: str) -> None:
 
 
 _CACHE_ERROR_MARKER = "__cached_error__"
+_SWR_MARKER = "__swr__"
+
+
+def _swr_envelope(value: Any, fresh: float) -> dict:
+    return {
+        _SWR_MARKER: {"at": time.time(), "fresh": float(fresh)},
+        "data": value,
+    }
+
+
+def _read_swr_envelope(cached: Any) -> tuple[Any, float, float] | None:
+    """Return (value, fresh_seconds, age_seconds) for an enveloped entry.
+
+    Anything that is not an envelope (legacy plain values, error payloads)
+    returns None so the caller can fall back to treating it as a hit.
+    """
+    if not isinstance(cached, dict):
+        return None
+    meta = cached.get(_SWR_MARKER)
+    if not isinstance(meta, dict):
+        return None
+    if _CACHE_ERROR_MARKER in cached:
+        return None
+    try:
+        fresh = float(meta.get("fresh", 0.0))
+        age = max(0.0, time.time() - float(meta.get("at", 0.0)))
+    except (TypeError, ValueError):
+        return None
+    return cached.get("data"), fresh, age
+
+
+async def cache_get_swr(key: str) -> tuple[str, Any]:
+    """Return (state, value) where state is one of:
+
+    "fresh"  - younger than its own fresh window
+    "stale"  - past fresh, still inside the stale window
+    "plain"  - a legacy/non-enveloped entry, treat as a normal hit
+    "error"  - a cached upstream failure
+    "miss"   - nothing stored
+    """
+    cached = await cache_get(key)
+    if cached is None:
+        return "miss", None
+
+    if isinstance(cached, dict) and _CACHE_ERROR_MARKER in cached:
+        return "error", cached
+
+    parsed = _read_swr_envelope(cached)
+    if parsed is None:
+        return "plain", cached
+
+    value, fresh, age = parsed
+    return ("fresh" if age < fresh else "stale"), value
+
+
+async def cache_set_swr(
+    key: str,
+    value: Any,
+    fresh: float,
+    stale: float,
+) -> bool:
+    """Store value so it is served as fresh for `fresh` seconds and as
+    stale-but-usable for a further `stale` seconds."""
+    hard_ttl = max(0.0, float(fresh)) + max(0.0, float(stale))
+    if hard_ttl <= 0:
+        return False
+
+    client = await _get_available_redis_client()
+    if client is None:
+        return False
+
+    try:
+        payload = json.dumps(
+            _swr_envelope(value, fresh), separators=(",", ":")
+        )
+    except (TypeError, ValueError):
+        return False
+
+    try:
+        await client.set(key, payload, ex=max(1, int(round(hard_ttl))))
+        return True
+    except Exception as error:
+        if not _is_pool_exhausted(error):
+            _disable_redis()
+        return False
 
 
 class CachedUpstreamError(Exception):
@@ -332,7 +439,14 @@ def _error_payload(error: Exception) -> dict:
     }
 
 
-def _raise_if_cached_error(cached: Any) -> None:
+def _is_transient_error(error: Exception) -> bool:
+    """A rate-limit rejection is momentary, unlike a genuine upstream
+    failure. Caching it would hand the same 429 to every reader for the
+    whole error TTL and cascade one busy slot into a burst of failures."""
+    return getattr(error, "status_code", None) == 429
+
+
+def raise_if_cached_error(cached: Any) -> None:
     if not isinstance(cached, dict):
         return
     failure = cached.get(_CACHE_ERROR_MARKER)
@@ -354,13 +468,31 @@ async def get_or_set_cached(
     poll_max_interval: float,
     error_ttl: float,
     loader: Callable[[], Awaitable[Any]],
+    stale: float = 0.0,
 ) -> Any:
-    if ttl <= 0:
+    if ttl <= 0 and stale <= 0:
         return await loader()
 
-    cached = await cache_get(key)
+    async def _read() -> Any:
+        if stale > 0:
+            state, value = await cache_get_swr(key)
+            if state == "miss":
+                return None
+            raise_if_cached_error(value)
+            return value
+        cached = await cache_get(key)
+        if cached is not None:
+            raise_if_cached_error(cached)
+        return cached
+
+    async def _write(value: Any) -> None:
+        if stale > 0:
+            await cache_set_swr(key, value, ttl, stale)
+        else:
+            await cache_set(key, value, ttl)
+
+    cached = await _read()
     if cached is not None:
-        _raise_if_cached_error(cached)
         return cached
 
     lock_key = f"{key}:lock"
@@ -368,17 +500,16 @@ async def get_or_set_cached(
 
     if await _acquire_cache_lock(lock_key, lock_ttl, token):
         try:
-            cached = await cache_get(key)
+            cached = await _read()
             if cached is not None:
-                _raise_if_cached_error(cached)
                 return cached
             try:
                 value = await loader()
             except Exception as error:
-                if error_ttl > 0:
+                if error_ttl > 0 and not _is_transient_error(error):
                     await cache_set(key, _error_payload(error), error_ttl)
                 raise
-            await cache_set(key, value, ttl)
+            await _write(value)
             return value
         finally:
             await _release_cache_lock(lock_key, token)
@@ -392,10 +523,41 @@ async def get_or_set_cached(
         if remaining <= 0:
             break
         await asyncio.sleep(min(interval, remaining))
-        cached = await cache_get(key)
+        cached = await _read()
         if cached is not None:
-            _raise_if_cached_error(cached)
             return cached
         interval = min(ceiling, interval * poll_backoff)
 
     return await loader()
+
+
+async def refresh_cached_swr(
+    key: str,
+    lock_ttl: float,
+    fresh: float,
+    stale: float,
+    loader: Callable[[], Awaitable[Any]],
+) -> bool:
+    """Single-flight background refresh.
+
+    Returns True when the value was refetched and re-stored, False when the
+    lock was already held by another worker. Never raises: a failed refresh
+    just leaves the previous (stale) entry in place for the next reader.
+    """
+    lock_key = f"{key}:lock"
+    token = uuid.uuid4().hex
+
+    if not await _acquire_cache_lock(lock_key, lock_ttl, token):
+        return False
+
+    try:
+        value = await loader()
+        await cache_set_swr(key, value, fresh, stale)
+        return True
+    except Exception:
+        # The reader already has the previous snapshot, so this is not worth
+        # failing their request over - but it must not vanish silently.
+        logger.exception("background refresh failed for %s", key)
+        return False
+    finally:
+        await _release_cache_lock(lock_key, token)

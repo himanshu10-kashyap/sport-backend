@@ -9,7 +9,13 @@ from urllib.parse import quote
 import httpx
 
 from utils.rate_limit import get_rate_limit_seconds
-from utils.redis import acquire_rate_limit_slot, get_or_set_cached
+from utils.redis import (
+    acquire_rate_limit_slot,
+    cache_get_swr,
+    get_or_set_cached,
+    raise_if_cached_error,
+    refresh_cached_swr,
+)
 
 
 def _env_float(name: str, fallback: float) -> float:
@@ -114,6 +120,8 @@ class SportsAPI365Client:
         ).strip() or "rl:sportsapi365"
         self._request_lock = asyncio.Lock()
         self._last_request_at = 0.0
+        self._refreshing: set[str] = set()
+        self._background: set[asyncio.Task] = set()
 
         self.cache_enabled = _env_bool("EXTERNAL_API_CACHE_ENABLED", True)
         self.cache_prefix = os.getenv(
@@ -160,6 +168,13 @@ class SportsAPI365Client:
         self.cache_error_ttl = max(
             0.0, _env_float("EXTERNAL_API_CACHE_ERROR_SECONDS", 2)
         )
+        self.cache_stale_seconds = max(
+            0.0, _env_float("EXTERNAL_API_LIVE_STALE_SECONDS", 60)
+        )
+        self.rate_limit_max_wait = max(
+            0.0,
+            _env_float("EXTERNAL_API_RATE_LIMIT_MAX_WAIT_SECONDS", 2.0),
+        )
         self.case_insensitive_params = frozenset(
             name.strip().lower()
             for name in os.getenv(
@@ -169,22 +184,31 @@ class SportsAPI365Client:
             if name.strip()
         )
 
-    def _resolve_cache_ttl(self, path: str) -> float:
+    async def _resolve_cache_ttl(self, path: str) -> float:
         if not self.cache_enabled:
             return 0.0
         if path in self.default_cache_paths:
-            return self.default_cache_ttl
-        if path in self.live_cache_paths:
-            return self.live_cache_ttl
-        if path in self.short_cache_paths:
-            return self.short_cache_ttl
-        return self.static_cache_ttl
+            ttl = self.default_cache_ttl
+        elif path in self.live_cache_paths:
+            ttl = self.live_cache_ttl
+        elif path in self.short_cache_paths:
+            ttl = self.short_cache_ttl
+        else:
+            ttl = self.static_cache_ttl
+        # The rate limit is global, so any entry expiring before the slot
+        # frees forces the next request to block. The limit already caps
+        # how fresh the data can be, so never let the TTL dip below it.
+        return max(ttl, await self._get_rate_limit_seconds())
 
     def _build_cache_key(
         self,
         path: str,
         params: Mapping[str, Any] | None,
+        resolved_path: str | None = None,
     ) -> str:
+        # resolved_path carries the actual {event_id}/{team_id}/... values.
+        # Without it every id would collapse onto the same key and one
+        # event's data would be served for all of them.
         cleaned = self._clean_params(params) or {}
         normalized = []
         for key in sorted(cleaned, key=str):
@@ -193,9 +217,9 @@ class SportsAPI365Client:
                 value = str(value).strip().lower()
             normalized.append(f"{key}={value}")
 
-        canonical = path
+        canonical = resolved_path or path
         if normalized:
-            canonical = f"{path}?{'&'.join(normalized)}"
+            canonical = f"{canonical}?{'&'.join(normalized)}"
 
         digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:16]
         return f"{self.cache_prefix}:{digest}"
@@ -248,27 +272,44 @@ class SportsAPI365Client:
         except Exception:
             return self.rate_limit_seconds
 
-    async def _wait_for_rate_limit(self) -> None:
+    async def _wait_for_rate_limit(self, max_wait: float | None = None) -> bool:
+        """Acquire the provider slot. False means "gave up waiting" - the
+        caller must not hit the upstream right now.
+
+        max_wait=None waits out the whole interval, which is right for a
+        cold miss: there is nothing cached to serve, so the only options
+        are to wait or to fail. Background refreshes pass a short max_wait
+        because stale data is already on its way to the user.
+        """
         rate_limit_seconds = await self._get_rate_limit_seconds()
         if rate_limit_seconds <= 0:
-            return
+            return True
 
         if self.redis_rate_limit_key:
-            acquired = await acquire_rate_limit_slot(
+            outcome = await acquire_rate_limit_slot(
                 self.redis_rate_limit_key,
                 rate_limit_seconds,
+                max_wait=max_wait,
             )
-            if acquired:
+            if outcome is True:
                 async with self._request_lock:
                     self._last_request_at = time.monotonic()
-                return
+                return True
+            if outcome is False:
+                # Redis is healthy and says the slot is genuinely busy.
+                # Falling through to the local throttle here would hand out
+                # a second slot and quietly double the call rate.
+                return False
 
+        # Redis is unavailable: keep the admin-set gap with a local lock so
+        # the provider is still called at the configured rate.
         async with self._request_lock:
             elapsed = time.monotonic() - self._last_request_at
             wait_time = rate_limit_seconds - elapsed
             if wait_time > 0:
                 await asyncio.sleep(wait_time)
             self._last_request_at = time.monotonic()
+        return True
 
     @staticmethod
     def _retry_delay(attempt: int, retry_after: str | None) -> float:
@@ -312,14 +353,51 @@ class SportsAPI365Client:
                 "SportsAPI365 returned invalid JSON", 502
             ) from error
 
+    def _schedule_refresh(
+        self,
+        key: str,
+        loader: Callable[[], Awaitable[Any]],
+        fresh: float,
+    ) -> None:
+        """Fire-and-forget refresh for a stale entry.
+
+        The shared lock keeps it single-flight, so N readers arriving
+        together still produce at most one upstream call. Failures are
+        swallowed: the previous snapshot stays in place and the next reader
+        tries again.
+        """
+        if key in self._refreshing:
+            return
+        self._refreshing.add(key)
+
+        async def _run() -> None:
+            try:
+                await refresh_cached_swr(
+                    key=key,
+                    lock_ttl=self.cache_lock_ttl,
+                    fresh=fresh,
+                    stale=self.cache_stale_seconds,
+                    loader=loader,
+                )
+            finally:
+                self._refreshing.discard(key)
+
+        task = asyncio.create_task(_run())
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
     async def _fetch(
         self,
         url: str,
         query_params: Mapping[str, Any] | None,
         headers: Mapping[str, str],
+        max_wait: float | None = None,
     ) -> Any:
         for attempt in range(self.max_retries + 1):
-            await self._wait_for_rate_limit()
+            if not await self._wait_for_rate_limit(max_wait):
+                raise CricketExternalAPIError(
+                    "Cricket data is busy, please retry shortly", 429
+                )
             try:
                 if self.client is not None:
                     response = await self.client.get(
@@ -378,19 +456,39 @@ class SportsAPI365Client:
                 "SportsAPI365 API key is not configured", 500
             )
 
-        url = f"{self.base_url}/{self._build_path(path, path_params)}"
+        resolved_path = self._build_path(path, path_params)
+        url = f"{self.base_url}/{resolved_path}"
         query_params = self._clean_params(params)
         headers = {
             "Accept": "application/json",
             "X-Gravitee-Api-Key": self.api_key,
         }
 
-        cache_ttl = self._resolve_cache_ttl(path)
+        cache_ttl = await self._resolve_cache_ttl(path)
         if cache_ttl <= 0:
             return await self._fetch(url, query_params, headers)
 
+        key = self._build_cache_key(path, query_params, resolved_path)
+        loader = lambda: self._fetch(url, query_params, headers)
+        # A background refresh is optional, so it gives up quickly rather
+        # than holding a worker while the user already has data on screen.
+        refresh_loader = lambda: self._fetch(
+            url, query_params, headers, max_wait=self.rate_limit_max_wait
+        )
+
+        state, value = await cache_get_swr(key)
+        if state in ("fresh", "plain"):
+            return value
+        if state == "error":
+            raise_if_cached_error(value)
+        if state == "stale":
+            # Serve the previous snapshot immediately and refresh behind the
+            # user's back, so a busy rate limit never delays the response.
+            self._schedule_refresh(key, refresh_loader, cache_ttl)
+            return value
+
         return await get_or_set_cached(
-            key=self._build_cache_key(path, query_params),
+            key=key,
             ttl=cache_ttl,
             lock_ttl=self.cache_lock_ttl,
             wait_seconds=self.cache_wait_seconds,
@@ -398,7 +496,8 @@ class SportsAPI365Client:
             poll_backoff=self.cache_poll_backoff,
             poll_max_interval=self.cache_poll_max_interval,
             error_ttl=self.cache_error_ttl,
-            loader=lambda: self._fetch(url, query_params, headers),
+            loader=loader,
+            stale=self.cache_stale_seconds,
         )
 
     async def events(
