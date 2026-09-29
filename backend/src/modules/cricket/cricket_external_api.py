@@ -10,6 +10,7 @@ import httpx
 
 from utils.rate_limit import get_rate_limit_seconds
 from utils.redis import (
+    UpstreamRateLimitUnavailable,
     acquire_rate_limit_slot,
     cache_get_swr,
     get_or_set_cached,
@@ -280,43 +281,38 @@ class SportsAPI365Client:
             return self.rate_limit_seconds
 
     async def _wait_for_rate_limit(self, max_wait: float | None = None) -> bool:
-        """Acquire the provider slot. False means "gave up waiting" - the
-        caller must not hit the upstream right now.
+        """Acquire the provider slot.
 
-        max_wait=None waits out the whole interval, which is right for a
-        cold miss: there is nothing cached to serve, so the only options
-        are to wait or to fail. Background refreshes pass a short max_wait
-        because stale data is already on its way to the user.
+        Returns True when the request may proceed, False when the upstream slot is
+        still busy and the caller should stop waiting. Redis outage is treated as a
+        hard error and is raised as CricketExternalAPIError(503).
         """
         rate_limit_seconds = await self._get_rate_limit_seconds()
         if rate_limit_seconds <= 0:
             return True
 
-        if self.redis_rate_limit_key:
-            outcome = await acquire_rate_limit_slot(
+        if not self.redis_rate_limit_key:
+            raise CricketExternalAPIError(
+                "Redis rate-limit key is not configured",
+                503,
+            )
+
+        try:
+            acquired = await acquire_rate_limit_slot(
                 self.redis_rate_limit_key,
                 rate_limit_seconds,
                 max_wait=max_wait,
             )
-            if outcome is True:
-                async with self._request_lock:
-                    self._last_request_at = time.monotonic()
-                return True
-            if outcome is False:
-                # Redis is healthy and says the slot is genuinely busy.
-                # Falling through to the local throttle here would hand out
-                # a second slot and quietly double the call rate.
-                return False
+        except UpstreamRateLimitUnavailable as exc:
+            raise CricketExternalAPIError(
+                "Redis is unreachable; SportsAPI365 rate limit cannot be enforced",
+                503,
+            ) from exc
 
-        # Redis is unavailable: keep the admin-set gap with a local lock so
-        # the provider is still called at the configured rate.
-        async with self._request_lock:
-            elapsed = time.monotonic() - self._last_request_at
-            wait_time = rate_limit_seconds - elapsed
-            if wait_time > 0:
-                await asyncio.sleep(wait_time)
-            self._last_request_at = time.monotonic()
-        return True
+        if acquired:
+            return True
+
+        return False
 
     @staticmethod
     def _retry_delay(attempt: int, retry_after: str | None) -> float:

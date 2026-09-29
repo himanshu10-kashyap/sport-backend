@@ -45,6 +45,10 @@ _redis_lock = asyncio.Lock()
 _redis_disabled_until = 0.0
 
 
+class UpstreamRateLimitUnavailable(RuntimeError):
+    """Raised when Redis cannot enforce the upstream quota."""
+
+
 def _redis_protocol() -> int:
     try:
         return int(os.getenv("REDIS_PROTOCOL", "2"))
@@ -149,23 +153,23 @@ async def acquire_rate_limit_slot(
     key: str,
     interval: float,
     max_wait: float | None = None,
-) -> bool | None:
-    """Try to take the slot.
+) -> bool:
+    """Acquire the upstream rate-limit slot.
 
-    True  - slot taken, go ahead
-    False - Redis is healthy but the slot stayed busy for the whole budget
-    None  - Redis is unavailable, caller may fall back to a local throttle
+    Returns True when the slot is available immediately.
+    Returns False when the slot remains busy until the allowed wait budget
+    expires. Raises UpstreamRateLimitUnavailable when Redis itself is down and
+    the portal's quota cannot be enforced safely.
     """
     if interval <= 0:
         return True
 
     client = await _get_available_redis_client()
     if client is None:
-        return None
+        raise UpstreamRateLimitUnavailable(
+            "Redis unreachable — cannot enforce rate limit"
+        )
 
-    # Without max_wait the caller accepts the full interval. Callers that
-    # must not block a user request pass max_wait to give up early and let
-    # them serve stale data instead.
     budget = (
         max(1.0, float(interval) + 1.0)
         if max_wait is None
@@ -187,7 +191,9 @@ async def acquire_rate_limit_slot(
         except Exception as error:
             if not _is_pool_exhausted(error):
                 _disable_redis()
-            return None
+            raise UpstreamRateLimitUnavailable(
+                "Redis unreachable — cannot enforce rate limit"
+            ) from error
 
         if wait_milliseconds <= 0:
             return True
@@ -200,13 +206,15 @@ async def acquire_rate_limit_slot(
 async def try_acquire_rate_limit_slot(
     key: str,
     interval: float,
-) -> bool | None:
+) -> bool:
     if interval <= 0:
         return True
 
     client = await _get_available_redis_client()
     if client is None:
-        return None
+        raise UpstreamRateLimitUnavailable(
+            "Redis unreachable — cannot enforce rate limit"
+        )
 
     try:
         wait_milliseconds = int(
@@ -222,7 +230,9 @@ async def try_acquire_rate_limit_slot(
     except Exception as error:
         if not _is_pool_exhausted(error):
             _disable_redis()
-        return None
+        raise UpstreamRateLimitUnavailable(
+            "Redis unreachable — cannot enforce rate limit"
+        ) from error
 
     return wait_milliseconds <= 0
 
@@ -300,7 +310,7 @@ async def cache_set(key: str, value: Any, ttl: float) -> bool:
 async def _acquire_cache_lock(key: str, ttl: float, token: str) -> bool:
     client = await _get_available_redis_client()
     if client is None:
-        return True
+        return False
 
     try:
         acquired = await client.set(
@@ -313,7 +323,7 @@ async def _acquire_cache_lock(key: str, ttl: float, token: str) -> bool:
     except Exception as error:
         if not _is_pool_exhausted(error):
             _disable_redis()
-        return True
+        return False
 
 
 async def _release_cache_lock(key: str, token: str) -> None:
@@ -513,6 +523,9 @@ async def get_or_set_cached(
             return value
         finally:
             await _release_cache_lock(lock_key, token)
+
+    if await _get_available_redis_client() is None:
+        return await loader()
 
     deadline = time.monotonic() + max(0.0, wait_seconds)
     interval = max(0.005, poll_interval)

@@ -9,7 +9,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from src.config.database import AsyncSessionLocal
 from src.models.rate_limit_model import RATE_LIMIT_DEFAULT_SECONDS, RateLimit
-from utils.redis import retry_after_seconds, try_acquire_rate_limit_slot
+from utils.redis import (
+    UpstreamRateLimitUnavailable,
+    retry_after_seconds,
+    try_acquire_rate_limit_slot,
+)
 
 
 RATE_LIMIT_CACHE_TTL_SECONDS = 5.0
@@ -167,9 +171,18 @@ class DynamicRateLimitMiddleware(BaseHTTPMiddleware):
         client_ip = self._client_identity(request)
         key = f"{self.key_prefix}{client_ip}"
 
-        acquired = await try_acquire_rate_limit_slot(key, interval)
-        if acquired is None:
-            acquired = await self._fallback_acquire(client_ip, interval)
+        try:
+            acquired = await try_acquire_rate_limit_slot(key, interval)
+        except UpstreamRateLimitUnavailable:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "success": False,
+                    "status_code": 503,
+                    "message": "Rate limiter unavailable, please try again later",
+                    "data": None,
+                },
+            )
 
         if acquired:
             return await call_next(request)
