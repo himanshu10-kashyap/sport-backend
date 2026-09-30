@@ -537,6 +537,9 @@ async def create_advertisement(
             title=title,
             description=payload.clean_description(),
             file=uploaded_url,
+            link=payload.clean_link(),
+            screen=payload.screen.value,
+            status=payload.status,
         )
 
         db.add(advertisement)
@@ -549,6 +552,9 @@ async def create_advertisement(
                 "title": advertisement.title,
                 "description": advertisement.description,
                 "file": advertisement.file,
+                "link": advertisement.link,
+                "screen": advertisement.screen,
+                "status": advertisement.status.value,
                 "createdAt": advertisement.created_at.isoformat()
                 if advertisement.created_at
                 else None,
@@ -590,6 +596,15 @@ async def update_advertisement(
         if payload.description is not None:
             advertisement.description = payload.clean_description()
 
+        if payload.link is not None:
+            advertisement.link = payload.clean_link()
+
+        if payload.screen is not None:
+            advertisement.screen = payload.screen.value
+
+        if payload.status is not None:
+            advertisement.status = payload.status
+
         if payload.has_new_file():
             try:
                 uploaded_url = await upload_file_to_s3_async(
@@ -613,6 +628,9 @@ async def update_advertisement(
                 "title": advertisement.title,
                 "description": advertisement.description,
                 "file": advertisement.file,
+                "link": advertisement.link,
+                "screen": advertisement.screen,
+                "status": advertisement.status.value,
                 "createdAt": advertisement.created_at.isoformat()
                 if advertisement.created_at
                 else None,
@@ -703,6 +721,9 @@ async def get_all_advertisements(
                 "title": advertisement.title,
                 "description": advertisement.description,
                 "file": advertisement.file,
+                "link": advertisement.link,
+                "screen": advertisement.screen,
+                "status": advertisement.status.value,
                 "createdAt": advertisement.created_at.isoformat()
                 if advertisement.created_at
                 else None,

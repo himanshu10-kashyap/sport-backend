@@ -3,6 +3,8 @@ from typing import List
 from fastapi import UploadFile
 from pydantic import BaseModel, Field
 
+from src.models.advertisement_model import AdvertisementScreen, AdvertisementStatus
+
 
 class AdminRegisterSchema(BaseModel):
     username: str = Field(..., min_length=3)
@@ -44,6 +46,9 @@ class AdvertisementCreateSchema(BaseModel):
     title: str = Field(..., min_length=1, max_length=255)
     description: str | None = None
     file: UploadFile
+    link: str | None = Field(None, max_length=500)
+    screen: AdvertisementScreen
+    status: AdvertisementStatus = AdvertisementStatus.ACTIVE
 
     def clean_title(self) -> str:
         return self.title.strip()
@@ -51,17 +56,26 @@ class AdvertisementCreateSchema(BaseModel):
     def clean_description(self) -> str | None:
         return (self.description or "").strip() or None
 
+    def clean_link(self) -> str | None:
+        return (self.link or "").strip() or None
+
 
 class AdvertisementUpdateSchema(BaseModel):
     title: str | None = Field(None, min_length=1, max_length=255)
     description: str | None = None
     file: UploadFile | None = None
+    link: str | None = Field(None, max_length=500)
+    screen: AdvertisementScreen | None = None
+    status: AdvertisementStatus | None = None
 
     def clean_title(self) -> str | None:
         return self.title.strip() if self.title is not None else None
 
     def clean_description(self) -> str | None:
         return (self.description or "").strip() or None
+
+    def clean_link(self) -> str | None:
+        return (self.link or "").strip() or None
 
     def has_new_file(self) -> bool:
         return self.file is not None and bool(self.file.filename)

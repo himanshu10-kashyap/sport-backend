@@ -548,6 +548,9 @@ async def get_cricket_advertisements(
                 "title": advertisement.title,
                 "description": advertisement.description,
                 "file": advertisement.file,
+                "link": advertisement.link,
+                "screen": advertisement.screen,
+                "status": advertisement.status.value,
                 "createdAt": advertisement.created_at.isoformat()
                 if advertisement.created_at
                 else None,
