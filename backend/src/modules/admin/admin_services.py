@@ -170,7 +170,6 @@ async def create_sub_admin(
             password=hashed_password,
             role="SUBADMIN",
             created_by=current_user.userid,
-            is_reset=True,
         )
 
         db.add(sub_admin)
@@ -390,7 +389,7 @@ async def sub_admin_change_password(db, payload, current_user):
             )
 
         existing_admin.password = hash_password(payload.newPassword)
-        existing_admin.is_reset = True
+        existing_admin.is_reset = False
 
         await db.commit()
         await db.refresh(existing_admin)
