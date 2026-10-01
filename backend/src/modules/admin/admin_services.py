@@ -35,6 +35,7 @@ from utils.jwt import create_access_token
 from utils.rate_limit import invalidate_rate_limit_cache
 from utils.s3 import delete_file_from_s3_async, upload_file_to_s3_async
 from utils.status_code import StatusCode
+from fastapi import UploadFile
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,7 @@ async def create_sub_admin(
             password=hashed_password,
             role="SUBADMIN",
             created_by=current_user.userid,
+            is_reset=True,
         )
 
         db.add(sub_admin)
@@ -388,7 +390,7 @@ async def sub_admin_change_password(db, payload, current_user):
             )
 
         existing_admin.password = hash_password(payload.newPassword)
-        existing_admin.is_reset = False
+        existing_admin.is_reset = True
 
         await db.commit()
         await db.refresh(existing_admin)
@@ -527,18 +529,17 @@ async def get_advertisement_by_id(db: AsyncSession, advertisement_id: int):
 async def create_advertisement(
     db: AsyncSession,
     payload: AdvertisementCreateSchema,
+    file: UploadFile,
 ):
     uploaded_url = None
     try:
         title = payload.clean_title()
         if not title:
-            return api_response_error(
-                "Title is required", StatusCode.badRequest, []
-            )
+            return api_response_error("Title is required", StatusCode.badRequest, [])
 
         try:
             uploaded_url = await upload_file_to_s3_async(
-                payload.file, folder=ADVERTISEMENT_S3_FOLDER
+                file, folder=ADVERTISEMENT_S3_FOLDER
             )
         except ValueError as e:
             return api_response_error(str(e), StatusCode.badRequest, [])
@@ -581,13 +582,14 @@ async def create_advertisement(
 
         return api_response_error(str(e), StatusCode.internalServerError, [])
 
-
 async def update_advertisement(
     db: AsyncSession,
     advertisement_id: int,
     payload: AdvertisementUpdateSchema,
+    file: UploadFile | None = None,
 ):
     previous_file = None
+    uploaded_url = None
     try:
         advertisement = await get_advertisement_by_id(db, advertisement_id)
         if not advertisement:
@@ -615,10 +617,10 @@ async def update_advertisement(
         if payload.status is not None:
             advertisement.status = payload.status
 
-        if payload.has_new_file():
+        if file is not None and file.filename:
             try:
                 uploaded_url = await upload_file_to_s3_async(
-                    payload.file, folder=ADVERTISEMENT_S3_FOLDER
+                    file, folder=ADVERTISEMENT_S3_FOLDER
                 )
             except ValueError as e:
                 return api_response_error(str(e), StatusCode.badRequest, [])
@@ -651,11 +653,13 @@ async def update_advertisement(
 
     except Exception as e:
         await db.rollback()
+        if uploaded_url:
+            await delete_file_from_s3_async(uploaded_url)
         print("Error In Updating Advertisement:", e)
 
         return api_response_error(str(e), StatusCode.internalServerError, [])
 
-
+    
 async def delete_advertisement(db: AsyncSession, advertisement_id: int):
     try:
         advertisement = await get_advertisement_by_id(db, advertisement_id)

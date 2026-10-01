@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Form
+from fastapi import APIRouter, Depends, Form, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config.database import get_db
@@ -147,7 +147,8 @@ async def edit_rate_limit(
 
 @router.post("/advertisements")
 async def add_advertisement(
-    payload: Annotated[AdvertisementCreateSchema, Form()],
+    payload: Annotated[AdvertisementCreateSchema, Depends(AdvertisementCreateSchema.as_form)],
+    file: Annotated[UploadFile, File()],
     db: AsyncSession = Depends(get_db),
     current_user=Depends(
         authorization(
@@ -156,13 +157,16 @@ async def add_advertisement(
         )
     ),
 ):
-    return await create_advertisement(db, payload)
+    return await create_advertisement(db, payload, file)
 
 
 @router.put("/advertisements/{advertisement_id}")
 async def edit_advertisement(
     advertisement_id: int,
-    payload: Annotated[AdvertisementUpdateSchema, Form()],
+    payload: Annotated[
+        AdvertisementUpdateSchema, Depends(AdvertisementUpdateSchema.as_form)
+    ],
+    file: Annotated[UploadFile | None, File()] = None,
     db: AsyncSession = Depends(get_db),
     current_user=Depends(
         authorization(
@@ -171,7 +175,7 @@ async def edit_advertisement(
         )
     ),
 ):
-    return await update_advertisement(db, advertisement_id, payload)
+    return await update_advertisement(db, advertisement_id, payload, file)
 
 
 @router.delete("/advertisements/{advertisement_id}")

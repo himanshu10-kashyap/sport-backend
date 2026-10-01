@@ -1,6 +1,6 @@
-from typing import List
+from typing import List,Annotated
 
-from fastapi import UploadFile
+from fastapi import UploadFile,Form
 from pydantic import BaseModel, Field, field_validator
 
 from src.models.advertisement_model import AdvertisementScreen, AdvertisementStatus
@@ -77,7 +77,6 @@ class RateLimitSchema(BaseModel):
 class AdvertisementCreateSchema(BaseModel):
     title: str = Field(..., min_length=1, max_length=255)
     description: str | None = None
-    file: UploadFile
     link: str | None = Field(None, max_length=500)
     screen: AdvertisementScreen
     status: AdvertisementStatus = AdvertisementStatus.ACTIVE
@@ -91,11 +90,27 @@ class AdvertisementCreateSchema(BaseModel):
     def clean_link(self) -> str | None:
         return (self.link or "").strip() or None
 
+    @classmethod
+    def as_form(
+        cls,
+        title: Annotated[str, Form(min_length=1, max_length=255)],
+        screen: Annotated[AdvertisementScreen, Form()],
+        description: Annotated[str | None, Form()] = None,
+        link: Annotated[str | None, Form(max_length=500)] = None,
+        status: Annotated[AdvertisementStatus, Form()] = AdvertisementStatus.ACTIVE,
+    ):
+        return cls(
+            title=title,
+            description=description,
+            link=link,
+            screen=screen,
+            status=status,
+        )
+
 
 class AdvertisementUpdateSchema(BaseModel):
     title: str | None = Field(None, min_length=1, max_length=255)
     description: str | None = None
-    file: UploadFile | None = None
     link: str | None = Field(None, max_length=500)
     screen: AdvertisementScreen | None = None
     status: AdvertisementStatus | None = None
@@ -109,6 +124,19 @@ class AdvertisementUpdateSchema(BaseModel):
     def clean_link(self) -> str | None:
         return (self.link or "").strip() or None
 
-    def has_new_file(self) -> bool:
-        return self.file is not None and bool(self.file.filename)
-
+    @classmethod
+    def as_form(
+        cls,
+        title: Annotated[str | None, Form(min_length=1, max_length=255)] = None,
+        description: Annotated[str | None, Form()] = None,
+        link: Annotated[str | None, Form(max_length=500)] = None,
+        screen: Annotated[AdvertisementScreen | None, Form()] = None,
+        status: Annotated[AdvertisementStatus | None, Form()] = None,
+    ):
+        return cls(
+            title=title,
+            description=description,
+            link=link,
+            screen=screen,
+            status=status,
+        )
