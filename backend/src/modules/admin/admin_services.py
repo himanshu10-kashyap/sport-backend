@@ -593,8 +593,8 @@ async def update_advertisement(
     try:
         advertisement = await get_advertisement_by_id(db, advertisement_id)
         if not advertisement:
-            return api_response_error(
-                "Advertisement not found", StatusCode.notFound, []
+            return api_response_success(
+                "Advertisement not found", StatusCode.success, []
             )
 
         if payload.title is not None:
@@ -664,8 +664,8 @@ async def delete_advertisement(db: AsyncSession, advertisement_id: int):
     try:
         advertisement = await get_advertisement_by_id(db, advertisement_id)
         if not advertisement:
-            return api_response_error(
-                "Advertisement not found", StatusCode.notFound, []
+            return api_response_success(
+                "Advertisement not found", StatusCode.success, []
             )
 
         stored_file = advertisement.file
