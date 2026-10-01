@@ -1,9 +1,31 @@
 from typing import List
 
 from fastapi import UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from src.models.advertisement_model import AdvertisementScreen, AdvertisementStatus
+from src.modules.admin.admin_helper import (
+    AVAILABLE_PERMISSIONS,
+    normalize_permissions,
+)
+
+_ALLOWED_LOWER = {item.lower() for item in AVAILABLE_PERMISSIONS}
+
+
+def _normalize_permission_list(value: list[str]) -> list[str]:
+    invalid = [
+        item
+        for item in value
+        if not isinstance(item, str) or item.strip().lower() not in _ALLOWED_LOWER
+    ]
+
+    if invalid:
+        raise ValueError(
+            f"Invalid permission(s): {', '.join(str(item) for item in invalid)}. "
+            f"Allowed values: {', '.join(AVAILABLE_PERMISSIONS)}"
+        )
+
+    return normalize_permissions(value)
 
 
 class AdminRegisterSchema(BaseModel):
@@ -20,9 +42,19 @@ class CreateSubAdminSchema(BaseModel):
     password: str = Field(..., min_length=6)
     permissions: list[str] = Field(default_factory=list)
 
+    @field_validator("permissions")
+    @classmethod
+    def validate_permissions(cls, value: list[str]) -> list[str]:
+        return _normalize_permission_list(value)
+
 
 class UpdatePermissionSchema(BaseModel):
     permissions: List[str] = Field(..., min_length=1)
+
+    @field_validator("permissions")
+    @classmethod
+    def validate_permissions(cls, value: List[str]) -> List[str]:
+        return _normalize_permission_list(value)
 
 
 

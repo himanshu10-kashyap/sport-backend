@@ -8,6 +8,7 @@ from src.modules.admin.admin_helper import (
     get_permission_list,
     get_rate_limit_value,
     hash_password,
+    normalize_permissions,
     serialize_admin,
     set_rate_limit_value,
     verify_password,
@@ -69,7 +70,9 @@ async def register_admin(db: AsyncSession, payload: AdminRegisterSchema):
         await db.refresh(new_admin)
 
         serializer_admin = serialize_admin(new_admin)
-        permission_list = await get_permission_list(db, str(new_admin.userid))
+        permission_list = await get_permission_list(
+            db, str(new_admin.userid), new_admin.role
+        )
 
         token = create_access_token(
             {
@@ -119,7 +122,9 @@ async def login_admin(db: AsyncSession, payload: AdminLoginSchema):
             )
 
         serializer_admin = serialize_admin(admin)
-        permission_list = await get_permission_list(db, str(admin.userid))
+        permission_list = await get_permission_list(
+            db, str(admin.userid), admin.role
+        )
 
         token = create_access_token(
             {
@@ -169,10 +174,14 @@ async def create_sub_admin(
         db.add(sub_admin)
         await db.flush()
 
-        if payload.permissions:
+        granted_permissions = normalize_permissions(payload.permissions)
+
+        if granted_permissions:
             permission_objects = [
-                Permission(userid=str(sub_admin.userid), permission=perm)
-                for perm in payload.permissions
+                Permission(
+                    userid=str(sub_admin.userid), permission=permission
+                )
+                for permission in granted_permissions
             ]
             db.add_all(permission_objects)
 
@@ -185,7 +194,7 @@ async def create_sub_admin(
                 "userid": str(sub_admin.userid),
                 "username": sub_admin.username,
                 "role": sub_admin.role,
-                "permissions": payload.permissions,
+                "permissions": granted_permissions,
             },
             "Sub admin created successfully",
             StatusCode.create,
@@ -211,18 +220,25 @@ async def sub_admin_permissions_edit(
                 "Permissions are required", StatusCode.badRequest, []
             )
 
+        granted_permissions = normalize_permissions(payload.permissions)
+
+        if not granted_permissions:
+            return api_response_error(
+                "Permissions are required", StatusCode.badRequest, []
+            )
+
         await db.execute(delete(Permission).where(Permission.userid == userid))
 
         permission_objects = [
             Permission(userid=userid, permission=permission)
-            for permission in payload.permissions
+            for permission in granted_permissions
         ]
 
         db.add_all(permission_objects)
         await db.commit()
 
         return api_response_success(
-            {"userid": userid, "permissions": payload.permissions},
+            {"userid": userid, "permissions": granted_permissions},
             "permissions updated successfully",
             StatusCode.success,
         )
@@ -319,13 +335,7 @@ async def get_sub_admin_permission(
                 [],
             )
 
-        permissions_result = await db.execute(
-            select(Permission.permission)
-            .where(Permission.userid == userid)
-            .order_by(Permission.id.desc())
-        )
-
-        permission_list = list(permissions_result.scalars().all())
+        permission_list = await get_permission_list(db, userid, admin.role)
 
         return api_response_success(
             {

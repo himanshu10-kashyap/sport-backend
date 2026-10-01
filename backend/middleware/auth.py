@@ -8,6 +8,11 @@ import os
 from src.config.database import get_db
 from src.models.admin_model import Admin
 from src.models.permission_model import Permission
+from src.modules.admin.admin_helper import (
+    PERMISSION_ALL,
+    normalize_permissions,
+    resolve_permissions,
+)
 
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
@@ -104,18 +109,18 @@ def authorization(
                 .all()
             )
 
-            permissions = [
-                (p.permission or "").upper()
-                for p in permissions_data
-            ]
+            permissions = resolve_permissions(
+                existing_user.role, [row.permission for row in permissions_data]
+            )
 
-            if "ALL" in permissions:
+            if PERMISSION_ALL in permissions:
                 return existing_user
 
             if required_permissions:
-                if not all(
-                    permission.upper() in permissions
-                    for permission in required_permissions
+                required = normalize_permissions(required_permissions)
+
+                if not required or not all(
+                    permission in permissions for permission in required
                 ):
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,
